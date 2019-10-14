@@ -2972,6 +2972,137 @@ and return the list."
               (elpy-company--cache-annotation arg)
               (elpy-company--cache-name arg)))))
 
+(defun elpy-company-backend-with-yasnippet (command &optional arg &rest ignored)
+  "A company-mode backend for Elpy.
+
+When yasnippet is available, try to create and expand a snippet for a
+function candidate on completion.  If you need only a function name,
+just perform \"C-d\". This will delete all the parameters including
+parentheses. Snippets for default arguments are expanded by default,
+but you can erase them as well as separators, which are \", \", by
+\"C-d\", too."
+  (interactive (list 'interactive))
+  (pcase command
+    (`interactive
+     (company-begin-backend 'elpy-company-backend))
+    ;; init => Called once per buffer
+    ;; prefix => return the prefix at point
+    (`prefix
+     (when (and elpy-mode
+                (not (company-in-string-or-comment)))
+       (company-grab-symbol-cons "\\." 1)))
+    ;; candidates <prefix> => return candidates for this prefix
+    (`candidates
+     (cons :async
+           (lambda (callback)
+             (elpy-rpc-get-completions
+              (lambda (result)
+                ;; add completion candidates from python.el
+                (setq result
+                      (elpy-company--add-interpreter-completions-candidates
+                       result))
+                (elpy-company--cache-clear)
+                (funcall
+                 callback
+                 (cond
+                  ;; The backend returned something
+                  (result
+                   (elpy-company--cache-completions arg result))
+                  (t
+                   nil))))))))
+    ;; sorted => t if the list is already sorted
+    (`sorted
+     t)
+    ;; duplicates => t if there could be duplicates
+    (`duplicates
+     nil)
+    ;; no-cache <prefix> => t if company shouldn't cache results
+    ;; meta <candidate> => short docstring for minibuffer
+    (`meta
+     (let ((meta (elpy-company--cache-meta arg)))
+       (when (and meta
+                  (string-match "\\`\\(.*\n.*\\)\n.*" meta))
+         (setq meta (match-string 1 meta)))
+       meta))
+    ;; annotation <candidate> => short docstring for completion buffer
+    (`annotation
+     (elpy-company--cache-annotation arg))
+    ;; doc-buffer <candidate> => put doc buffer in `company-doc-buffer'
+    (`doc-buffer
+     (let* ((name (elpy-company--cache-name arg))
+            (doc (when name
+                   (elpy-rpc-get-completion-docstring name))))
+       (when doc
+         (company-doc-buffer doc))))
+    ;; require-match => Never require a match, even if the user
+    ;; started to interact with company. See `company-require-match'.
+    (`require-match
+     'never)
+    ;; location <candidate> => (buffer . point) or (file .
+    ;; line-number)
+    (`location
+     (let* ((name (elpy-company--cache-name arg))
+            (loc (when name
+                   (elpy-rpc-get-completion-location name))))
+       (when loc
+         (cons (car loc)
+               (cadr loc)))))
+    ;; match <candidate> => for non-prefix based backends
+    ;; post-completion <candidate> => after insertion, for snippets
+    (`post-completion
+     (elpy-company--expand-snippet (elpy-company--cache-annotation arg)
+                                   (elpy-company--cache-name arg)))))
+
+(defun elpy-company--expand-snippet (annotation name)
+  (when (and (fboundp 'yas-expand-snippet) annotation name)
+    (let ((doc (elpy-rpc-get-completion-docstring name))
+          (snippet nil))
+      (cond
+       ((member annotation '("function" "class"))
+        (setq snippet (elpy-company--make-yasnippet-template
+                       name
+                       (car (split-string doc "[\n]"))))
+        (and snippet (yas-expand-snippet snippet)))
+       (t
+        nil)))))
+
+(defun elpy-company--make-yasnippet-template (name doc)
+  (message "DEBUG: make-yasnippet-template, doc=%s" doc)
+  ;; For now, we remove "self" in a parameter like the one in
+  ;; "split(self)" because I cannot imagine the case where that self
+  ;; is needed.
+  (let* ((doc (replace-regexp-in-string "(self)" "()" doc))
+         (params
+          (and (string-match-p (format "%s([^)]*)" name) doc)
+               (split-string (substring-no-properties doc
+                                                      (1+ (string-match-p "(" doc))
+                                                      (string-match-p ")" doc))
+                             "[ ,]"
+                             t)))
+         (ix 1))
+    (concat "${1:("
+            (if params
+                (cl-reduce
+                 (lambda (x y)
+                   (concat
+                    x
+                    (cond
+                     ((string-match-p "=" y)
+                      ;; default argument
+                      (concat (if (= 1 ix)
+                                  ""
+                                (format "${%d:, }" (incf ix)))
+                              (format "${%d:%s}" (incf ix) y)))
+                     (t
+                      (format "%s${%d:%s}"
+                              (if (= 1 ix) "" ", ")
+                              (incf ix)
+                              y)))))
+                 params
+                 :initial-value "")
+              "${2:}")
+            ")}$0")))
+
 (defun elpy--sort-and-strip-duplicates (seq)
   "Sort SEQ and remove any duplicates."
   (sort (delete-dups seq)
