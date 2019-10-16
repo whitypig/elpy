@@ -3050,8 +3050,8 @@ but you can erase them as well as separators, which are \", \", by
     ;; match <candidate> => for non-prefix based backends
     ;; post-completion <candidate> => after insertion, for snippets
     (`post-completion
-     (elpy-company--expand-snippet (elpy-company--cache-annotation arg)
-                                   (elpy-company--cache-name arg)))))
+     (ignore-errors (elpy-company--expand-snippet (elpy-company--cache-annotation arg)
+                                                  (elpy-company--cache-name arg))))))
 
 (defun elpy-company--expand-snippet (annotation name)
   (when (and (fboundp 'yas-expand-snippet) annotation name)
@@ -3061,47 +3061,122 @@ but you can erase them as well as separators, which are \", \", by
        ((member annotation '("function" "class"))
         (setq snippet (elpy-company--make-yasnippet-template
                        name
-                       (car (split-string doc "[\n]"))))
+                       (elpy-company--get-signature name doc)))
         (and snippet (yas-expand-snippet snippet)))
        (t
         nil)))))
 
-(defun elpy-company--make-yasnippet-template (name doc)
-  (message "DEBUG: make-yasnippet-template, doc=%s" doc)
+(defun elpy-company--get-signature (name doc)
+  "Try to extract the simplest form of signatures in DOC. There are
+  two cases to consider.
+1. DOC contains no description.
+2. DOC contains description.
+
+For case 1, the last line in DOC is highly likely to be the line we
+want.
+For case 2, we assume that the last line of signatures that leads to
+description in DOC is what we need.
+
+Take \"map\" as an example. This is case 2.
+Its DOC is as follows:
+map(func: Callable[..., _S], iter1: Iterable[Any], iter2: Iterable[Any], iter3: Iterable[Any], iter4: Iterable[Any], iter5: Iterable[Any], iter6: Iterable[Any], /, *iterables: Iterable[Any]) -> List[_S]
+...
+...
+...
+map(func: None, iter1: Iterable[_T1], /) -> List[_T1]
+
+map(function, sequence[, sequence, ...]) -> list   # <--- THIS LINE IS WHAT WE NEED.
+
+Return a list of the results of applying the function to the items of
+the argument sequence(s).  If more than one sequence is given, the
+function is called with an argument list consisting of the corresponding
+item of each sequence, substituting None for missing values when not all
+sequences have the same length.  If the function is None, return a list of
+the items of the sequence (or a list of tuples if more than one sequence)."
+  (let ((lines (split-string doc "\n" t " "))
+        (reg (format "^%s(.*)" name)))
+    (cond
+     ((cl-every (lambda (line) (string-match-p reg line)) lines)
+      ;; case 1
+      (car (last lines)))
+     (t
+      ;; case 2
+      (cl-loop for next in (cdr lines)
+               for cur in lines
+               when (not (string-match-p reg next))
+               return cur)))))
+
+(defun elpy-company--make-yasnippet-template (name signature)
   ;; For now, we remove "self" in a parameter like the one in
   ;; "split(self)" because I cannot imagine the case where that self
   ;; is needed.
-  (let* ((doc (replace-regexp-in-string "(self)" "()" doc))
-         (params
-          (and (string-match-p (format "%s([^)]*)" name) doc)
-               (split-string (substring-no-properties doc
-                                                      (1+ (string-match-p "(" doc))
-                                                      (string-match-p ")" doc))
-                             "[ ,]"
-                             t)))
-         (ix 1))
-    (concat "${1:("
-            (if params
-                (cl-reduce
-                 (lambda (x y)
-                   (concat
-                    x
-                    (cond
-                     ((string-match-p "=" y)
-                      ;; default argument
-                      (concat (if (= 1 ix)
-                                  ""
-                                (format "${%d:, }" (incf ix)))
-                              (format "${%d:%s}" (incf ix) y)))
-                     (t
-                      (format "%s${%d:%s}"
-                              (if (= 1 ix) "" ", ")
-                              (incf ix)
-                              y)))))
-                 params
-                 :initial-value "")
-              "${2:}")
-            ")}$0")))
+  ;; (message "DEBUG: signature=%s" signature)
+  (when (and name signature)
+    (let* ((signature (replace-regexp-in-string "(self)" "()" signature))
+           (params
+            (and (string-match (format "%s(\\([^)]*\\))" name) signature)
+                 (cl-remove-if
+                  (lambda (elt) (string= elt "/"))
+                  (elpy-company--split-string-by-toplevel-comma
+                   (replace-regexp-in-string " /$"
+                                             ""
+                                             (match-string 1 signature))))))
+           (ix 1))
+      ;; (message "DEBUG: params=%s" params)
+      (concat "${1:("
+              (if params
+                  (cl-reduce
+                   (lambda (x y)
+                     (concat
+                      x
+                      (cond
+                       ((string-match-p "=" y)
+                        ;; default argument
+                        (concat (if (= 1 ix)
+                                    ""
+                                  (format "${%d:, }" (incf ix)))
+                                (format "${%d:%s}" (incf ix) y)))
+                       (t
+                        (format "%s${%d:%s}"
+                                (if (= 1 ix) "" ", ")
+                                (incf ix)
+                                y)))))
+                   params
+                   :initial-value "")
+                "${2:}")
+              ")}$0"))))
+
+(defun elpy-company--split-string-by-toplevel-comma (s)
+  "Split string S by toplevel SEPARATORS.
+
+Examples:
+\"function: Callable[[_T], Any], iterable: Iterable[_T], /\"
+=> (\"function: Callable[[_T], Any]\" \"iterable: Iterable[_T]\" \"/\")"
+  (cl-loop for ch in (split-string s "" t)
+           with depth = 0
+           with acc = nil
+           with ret = nil
+           with separator = "[,]"
+           do (cond
+               ((string-match-p separator ch)
+                (cond
+                 ((zerop depth)
+                  (when acc (push (cl-reduce #'concat (nreverse acc)) ret))
+                  (setq acc nil))
+                 ((> depth 0)
+                  (push ch acc))))
+               ((member ch '("(" "["))
+                (incf depth)
+                (push ch acc))
+               ((member ch '(")" "]"))
+                (decf depth)
+                (push ch acc))
+               (t
+                (push ch acc)))
+           finally (progn
+                     (when acc
+                       (push (cl-reduce #'concat (nreverse acc)) ret))
+                     (return (mapcar #'s-trim (nreverse ret))))))
 
 (defun elpy--sort-and-strip-duplicates (seq)
   "Sort SEQ and remove any duplicates."
