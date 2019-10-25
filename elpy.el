@@ -305,12 +305,12 @@ option is `pdb'."
     ;; Alphabetical order to make it easier to find free C-c C-X
     ;; bindings in the future. Heh.
 
-    ;; (define-key map (kbd "<backspace>") 'python-indent-dedent-line-backspace)
-    ;; (define-key map (kbd "<backtab>")   'python-indent-dedent-line)
+    (define-key map (kbd "<backspace>") 'python-indent-dedent-line-backspace)
+    (define-key map (kbd "<backtab>")   'python-indent-dedent-line)
 
-    ;; (define-key map (kbd "C-M-x")   'python-shell-send-defun)
-    ;; (define-key map (kbd "C-c <")   'python-indent-shift-left)
-    ;; (define-key map (kbd "C-c >")   'python-indent-shift-right)
+    (define-key map (kbd "C-M-x")   'python-shell-send-defun)
+    (define-key map (kbd "C-c <")   'python-indent-shift-left)
+    (define-key map (kbd "C-c >")   'python-indent-shift-right)
     (define-key map (kbd "C-c RET") 'elpy-importmagic-add-import)
     (define-key map (kbd "C-c C-b") 'elpy-nav-expand-to-indentation)
     (define-key map (kbd "C-c C-c") 'elpy-shell-send-region-or-buffer)
